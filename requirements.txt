@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+PyMuPDF
+pyserial
+requests
+reportlab
+python-dotenv
+pytest

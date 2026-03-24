@@ -1,0 +1,48 @@
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+frontend/.npm/
+frontend/.pnpm-store/
+
+# Logs and local runtime output
+*.log
+uvicorn_stdout.log
+uvicorn_stderr.log
+frontend/frontend_page_stdout.log
+frontend/frontend_page_stderr.log
+frontend/next_stdout.log
+frontend/next_stderr.log
+
+# Generated artifacts
+arduino/generated/
+
+# Local docs and samples
+.demo/
+demo-sn7400.pdf
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local design reference
+ARCHITECTURE.md
+

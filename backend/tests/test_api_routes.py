@@ -30,8 +30,8 @@ def _build_sample_pdf_bytes() -> bytes:
 
 @pytest.mark.anyio
 async def test_extract_requirements_route_returns_success() -> None:
-    """Verify the extract requirements route returns requirements and conflicts."""
-    with patch(
+    """Verify the extract requirements route returns requirements, conflicts, and document metadata."""
+    with patch("backend.main.create_run_record", return_value="run-123"), patch(
         "backend.agents.extractor.ask_nova",
         return_value='[{"id": "REQ-001", "description": "Output HIGH voltage must be greater than 2.4V", "acceptance_criteria": "> 2.4V", "test_method": "Apply HIGH inputs and measure output voltage"}]',
     ):
@@ -47,6 +47,10 @@ async def test_extract_requirements_route_returns_success() -> None:
     assert payload["status"] == "success"
     assert payload["data"]["requirements"][0]["id"] == "REQ-001"
     assert payload["data"]["conflicts"] == []
+    assert payload["data"]["document"]["page_count"] == 1
+    assert payload["data"]["document"]["character_count"] > 0
+    assert payload["data"]["document"]["approximate_input_tokens"] > 0
+    assert payload["data"]["run_id"] == "run-123"
 
 
 @pytest.mark.anyio
@@ -258,17 +262,30 @@ async def test_ask_results_route_returns_answer() -> None:
             response = await client.post(
                 "/api/ask-results",
                 json={
-                    "question": "Is this safe for automotive use?",
-                    "analysis": {"total_tests": 16, "failed": 2, "spc_summary": {"groups": []}, "failures": []},
+                    "question": "Why did you reject this chip?",
+                    "analysis": {
+                        "total_tests": 16,
+                        "failed": 2,
+                        "spc_summary": {"groups": []},
+                        "failures": [
+                            {
+                                "test_id": "TC-012",
+                                "description": "Gate 2 output LOW voltage out of spec",
+                            }
+                        ],
+                    },
                     "readings": [],
                     "requirements": [],
                     "test_plan": [],
+                    "coverage_summary": {"gaps": ["REQ-004 is mapped but not yet exercised under timing conditions."]},
+                    "decision_state": {"next_action": "Quarantine the DUT and collect timing evidence before release."},
                 },
             )
 
     payload = response.json()
     assert response.status_code == 200
-    assert "automotive" in payload["data"]["response"]["answer"].lower()
+    assert "reject" in payload["data"]["response"]["answer"].lower()
+    assert any(citation["kind"] == "coverage" for citation in payload["data"]["response"]["citations"])
 
 
 @pytest.mark.anyio
@@ -331,3 +348,51 @@ async def test_health_route_returns_ok_status() -> None:
     payload = response.json()
     assert response.status_code == 200
     assert payload == {"status": "success", "data": {"status": "ok"}, "message": "Service healthy"}
+
+
+@pytest.mark.anyio
+async def test_model_status_route_returns_current_routing_stack() -> None:
+    """Verify the model-status route exposes the configured routing stack for the frontend."""
+    with patch(
+        "backend.main.get_model_status",
+        return_value={
+            "primary_provider": "Groq",
+            "primary_model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            "fallback_provider": "AWS Bedrock",
+            "fallback_model": "amazon.nova-pro-v1:0",
+            "active_provider": "Groq",
+            "active_model": "meta-llama/llama-4-scout-17b-16e-instruct",
+            "fallback_used": False,
+            "last_error": None,
+            "routing_mode": "Groq primary with Bedrock fallback on Groq rate/spend limit",
+        },
+    ):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            response = await client.get("/api/model-status")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]["model"]["primary_provider"] == "Groq"
+    assert payload["data"]["model"]["fallback_provider"] == "AWS Bedrock"
+
+
+@pytest.mark.anyio
+async def test_get_run_route_returns_persisted_record() -> None:
+    """Verify the persisted run route returns a stored run and event log."""
+    with patch(
+        "backend.main.fetch_run_record",
+        return_value={
+            "run_id": "run-123",
+            "mode": "hardware",
+            "current_stage": "analysis",
+            "events": [{"stage": "requirements", "event_type": "requirements_extracted", "payload": {"requirements": 4}}],
+        },
+    ):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            response = await client.get("/api/runs/run-123")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["data"]["run"]["run_id"] == "run-123"
+    assert payload["data"]["run"]["events"][0]["event_type"] == "requirements_extracted"
+

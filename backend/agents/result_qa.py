@@ -18,6 +18,12 @@ Question:
 Analysis:
 {analysis_json}
 
+Coverage summary:
+{coverage_json}
+
+Decision state:
+{decision_json}
+
 Batch analysis:
 {batch_json}
 
@@ -38,6 +44,8 @@ def _fallback_answer(
     analysis: dict,
     requirements: list[dict],
     batch_analysis: dict | None,
+    coverage_summary: dict | None = None,
+    decision_state: dict | None = None,
 ) -> dict:
     lowered = question.lower()
     failures = analysis.get("failures", [])
@@ -48,6 +56,52 @@ def _fallback_answer(
         default=None,
     )
     hotspot_gate = batch_analysis.get("predicted_hotspot_gate") if batch_analysis else None
+    coverage_gaps = (coverage_summary or {}).get("gaps", [])
+
+    if ("why" in lowered and "reject" in lowered) or "why did you reject" in lowered:
+        first_failure = failures[0] if failures else None
+        gap_excerpt = coverage_gaps[0] if coverage_gaps else "No untested requirement gap was supplied with the current run context."
+        if first_failure:
+            answer = (
+                f"The current run is rejected because {first_failure.get('test_id', 'the leading failure')} violated the measured electrical limit. "
+                f"{first_failure.get('description', 'A failure was detected.')}."
+            )
+            if gap_excerpt:
+                answer += f" Coverage context: {gap_excerpt}"
+            if decision_state and decision_state.get("next_action"):
+                answer += f" Recommended next action: {decision_state['next_action']}"
+            return {
+                "answer": answer,
+                "citations": [
+                    {
+                        "kind": "failure",
+                        "reference": first_failure.get("test_id", "failure"),
+                        "excerpt": first_failure.get("description", ""),
+                    },
+                    {
+                        "kind": "coverage",
+                        "reference": "coverage-gap",
+                        "excerpt": gap_excerpt,
+                    },
+                ],
+            }
+
+    if "coverage" in lowered or "gap" in lowered:
+        if coverage_gaps:
+            return {
+                "answer": (
+                    "Coverage is incomplete. The biggest remaining gaps are: "
+                    + "; ".join(coverage_gaps[:3])
+                ),
+                "citations": [
+                    {"kind": "coverage", "reference": f"gap-{index + 1}", "excerpt": gap}
+                    for index, gap in enumerate(coverage_gaps[:3])
+                ],
+            }
+        return {
+            "answer": "Coverage appears complete for the current structured requirement set, but no explicit gap list was supplied.",
+            "citations": [],
+        }
 
     if "thermal" in lowered or "fail first" in lowered:
         if hotspot_gate is not None:
@@ -130,11 +184,15 @@ def answer_results_question(
     requirements: list[dict],
     test_plan: list[dict],
     batch_analysis: dict | None = None,
+    coverage_summary: dict | None = None,
+    decision_state: dict | None = None,
 ) -> dict:
     """Answer a natural-language question using verification evidence."""
     prompt = QA_PROMPT_TEMPLATE.format(
         question=question,
         analysis_json=json.dumps({**analysis, "readings_considered": len(readings)}, indent=2),
+        coverage_json=json.dumps(coverage_summary or {}, indent=2),
+        decision_json=json.dumps(decision_state or {}, indent=2),
         batch_json=json.dumps(batch_analysis or {}, indent=2),
         requirements_json=json.dumps(requirements[:6], indent=2),
         test_plan_json=json.dumps(test_plan[:6], indent=2),
@@ -147,4 +205,4 @@ def answer_results_question(
     except (ValueError, json.JSONDecodeError, requests.RequestException, RuntimeError):
         pass
 
-    return _fallback_answer(question, analysis, requirements, batch_analysis)
+    return _fallback_answer(question, analysis, requirements, batch_analysis, coverage_summary, decision_state)

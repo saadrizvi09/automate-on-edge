@@ -1,4 +1,4 @@
-import type { TestPlanItem } from "../lib/api";
+﻿import type { TestPlanItem } from "../lib/api";
 
 interface TestPlanTableProps {
   testPlan: TestPlanItem[];
@@ -7,7 +7,7 @@ interface TestPlanTableProps {
 export function TestPlanTable({ testPlan }: TestPlanTableProps) {
   return (
     <section className="panel stack">
-      <div className="eyebrow">Stage 3 output</div>
+      <div className="eyebrow">Test plan</div>
       <h2 style={{ margin: 0 }}>Generated test plan</h2>
       <div className="table-wrap">
         <table>
@@ -42,3 +42,4 @@ export function TestPlanTable({ testPlan }: TestPlanTableProps) {
     </section>
   );
 }
+

@@ -1,12 +1,16 @@
+﻿
 "use client";
 
 import { startTransition, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 import { AgentLoopPanel } from "./AgentLoopPanel";
+import { AgentTimelinePanel } from "./AgentTimelinePanel";
 import { AnalysisPanel } from "./AnalysisPanel";
 import { BatchInsightPanel } from "./BatchInsightPanel";
 import { ConflictPanel } from "./ConflictPanel";
+import { CoveragePanel } from "./CoveragePanel";
+import { DecisionPanel } from "./DecisionPanel";
 import { LiveReadings } from "./LiveReadings";
 import { PipelineProgress, type StepInsight } from "./PipelineProgress";
 import { ReportDownload } from "./ReportDownload";
@@ -17,20 +21,30 @@ import { StatisticalPanel } from "./StatisticalPanel";
 import { TestPlanTable } from "./TestPlanTable";
 import type {
   AnalysisResult,
+  AnomalyHighlight,
   BatchAnalysis,
   ChatCitation,
+  ExtractionDocument,
+  ModelStatus,
   FollowUpRun,
   ReadingItem,
   RequirementConflict,
   RequirementItem,
   TestPlanItem,
   VerificationMode,
-  AnomalyHighlight,
 } from "../lib/api";
+import {
+  buildCoverageSummary,
+  buildDecisionSnapshot,
+  createTimelineEntry,
+  type ConfidenceHistoryPoint,
+  type TimelineEntry,
+} from "../lib/workflow-intelligence";
 
 interface UploadSectionProps {
   mode: VerificationMode;
   busy: boolean;
+  workflowActive: boolean;
   onModeChange: (mode: VerificationMode) => void;
   onStart: (file: File) => void | Promise<void>;
 }
@@ -46,8 +60,8 @@ const progressSteps = [
   { title: "Test Plan", detail: "Translate requirements into executable verification cases." },
   { title: "Script", detail: "Generate the Arduino validation sketch for the DUT." },
   { title: "Execution", detail: "Stream live hardware or simulation data with anomaly alerts." },
-  { title: "Analysis", detail: "Compute SPC, failures, and an autonomous follow-up plan." },
-  { title: "Report", detail: "Package the DVP narrative, SPC, follow-up, and predictive views into PDF form." },
+  { title: "Analysis", detail: "Compute SPC, failures, adaptive confidence, and autonomous follow-up." },
+  { title: "Report", detail: "Package the report, evidence chat, and release decision into a final handoff." },
 ];
 
 function clipText(value: string, limit = 120): string {
@@ -57,60 +71,91 @@ function clipText(value: string, limit = 120): string {
   return `${value.slice(0, limit - 1).trimEnd()}...`;
 }
 
-export function UploadSection({ mode, busy, onModeChange, onStart }: UploadSectionProps) {
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function compactNumber(value: number): string {
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(1)}k`;
+  }
+  return String(value);
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${bytes} B`;
+}
+
+export function UploadSection({ mode, busy, workflowActive, onModeChange, onStart }: UploadSectionProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   return (
-    <motion.section 
+    <motion.section
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
-      className="panel stack"
+      className="panel stack upload-panel"
     >
-      <div className="eyebrow">Stage 1</div>
-      <h2
-        style={{
-          margin: 0,
-          background: "linear-gradient(135deg, rgba(255,255,255,1), rgba(124,245,255,0.82))",
-          WebkitBackgroundClip: "text",
-          WebkitTextFillColor: "transparent",
-        }}
-      >
-        Upload datasheet and choose execution mode
-      </h2>
-      <p className="muted" style={{ marginTop: 0 }}>
-        Hardware mode streams real serial data from the Arduino rig. Simulation mode unlocks autonomous batch prediction and synthetic drift studies.
-      </p>
-      <div className="mode-row">
-        <button className={`mode-pill ${mode === "hardware" ? "active" : ""}`} onClick={() => onModeChange("hardware")} type="button">
-          Hardware mode
+      <div className="panel-headline-row">
+        <div>
+          <div className="eyebrow">Control desk</div>
+          <h2 className="gradient-text" style={{ margin: 0 }}>Load a datasheet and arm the workflow</h2>
+        </div>
+        <p className="muted panel-aside">
+          Keep the controls visible while the agent extracts specs, plans tests, streams evidence, and branches into follow-up runs.
+        </p>
+      </div>
+      <div className="mode-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        <button className={`mode-pill ${mode === "hardware" ? "active" : ""}`} disabled={busy} onClick={() => onModeChange("hardware")} type="button" style={{ textAlign: "left", minHeight: 96 }}>
+          <strong style={{ display: "block", marginBottom: 6 }}>Hardware mode</strong>
+          <span>Flash the Arduino rig and stream real serial measurements.</span>
         </button>
-        <button className={`mode-pill ${mode === "simulation" ? "active" : ""}`} onClick={() => onModeChange("simulation")} type="button">
-          Simulation mode
+        <button className={`mode-pill ${mode === "simulation" ? "active" : ""}`} disabled={busy} onClick={() => onModeChange("simulation")} type="button" style={{ textAlign: "left", minHeight: 96 }}>
+          <strong style={{ display: "block", marginBottom: 6 }}>Simulation mode</strong>
+          <span>Run the full loop with deterministic demo data and batch insights.</span>
         </button>
       </div>
       <div style={{ position: "relative" }}>
-        <input
-          className="file-input"
-          accept="application/pdf"
-          type="file"
-          onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-        />
-        {busy && (
-           <motion.div 
-             style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.56)", backdropFilter: "blur(10px)", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 20, color: "var(--accent-cyan)" }}
-             initial={{ opacity: 0 }}
-             animate={{ opacity: 1 }}
-           >
-              Analysing Document...
-           </motion.div>
-        )}
+        <div className="file-input" style={{ display: "grid", gap: 14, borderRadius: 24 }}>
+          <input accept="application/pdf" type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer" }} />
+          <span className="signal-chip" style={{ width: "fit-content" }}>{selectedFile ? "PDF armed" : "PDF intake"}</span>
+          <div>
+            <h3 style={{ margin: "0 0 8px", fontSize: 24 }}>{selectedFile ? selectedFile.name : "Drop a datasheet here or browse from disk"}</h3>
+            <p className="muted" style={{ margin: 0 }}>Use a PDF with measurable thresholds, limits, or timing specs for the cleanest extraction.</p>
+          </div>
+          {selectedFile ? (
+            <div className="analysis-card accent-card" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+              <div><div className="muted">Selected file</div><strong>{selectedFile.name}</strong></div>
+              <div><div className="muted">Size</div><strong>{formatFileSize(selectedFile.size)}</strong></div>
+              <div><div className="muted">Run action</div><strong>{workflowActive ? "Restart current run" : "Start fresh run"}</strong></div>
+            </div>
+          ) : null}
+        </div>
+        {busy ? (
+          <motion.div
+            style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.56)", backdropFilter: "blur(10px)", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 24, color: "var(--accent-cyan)" }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+          >
+            Analysing document...
+          </motion.div>
+        ) : null}
       </div>
-      <div className="button-row">
+      <div className="button-row" style={{ alignItems: "flex-start" }}>
         <button className="action-btn" disabled={!selectedFile || busy} onClick={() => selectedFile && onStart(selectedFile)} type="button">
-          {busy ? "Processing Pipeline..." : "Initialize Agentic Flow"}
+          {busy ? "Processing pipeline..." : workflowActive ? "Restart workflow" : "Initialize agentic flow"}
         </button>
-        <span className="muted">The pipeline pauses after script generation for explicit review.</span>
+        <span className="muted" style={{ maxWidth: 620 }}>
+          {workflowActive ? "Starting again replaces the current dashboard state with a fresh traced run." : "The flow pauses after sketch generation so you can review the bench logic before execution."}
+        </span>
       </div>
     </motion.section>
   );
@@ -136,6 +181,34 @@ export function VerificationDashboard() {
   const [anomalies, setAnomalies] = useState<AnomalyHighlight[]>([]);
   const [agentNote, setAgentNote] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [documentMeta, setDocumentMeta] = useState<ExtractionDocument | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEntry[]>([]);
+  const [confidenceHistory, setConfidenceHistory] = useState<ConfidenceHistoryPoint[]>([]);
+
+  const coverageSummary = buildCoverageSummary(requirements, testPlan, readings, analysis);
+  const decisionSnapshot = buildDecisionSnapshot({
+    busy,
+    progressIndex,
+    readyForReview,
+    analysis,
+    coverage: coverageSummary,
+    readings,
+    followUpRuns,
+    anomalies,
+    mode,
+  });
+
+  async function refreshModelStatus() {
+    try {
+      const api = await import("../lib/api");
+      const status = await api.getModelStatus();
+      setModelStatus(status);
+    } catch {
+      // Ignore status refresh failures; they should not interrupt the workflow.
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -145,7 +218,41 @@ export function VerificationDashboard() {
     };
   }, [reportUrl]);
 
-  function resetState() {
+  useEffect(() => {
+    const marker = {
+      id: `${decisionSnapshot.state}-${decisionSnapshot.confidence.toFixed(2)}-${progressIndex}-${analysis?.failed ?? 0}-${coverageSummary.covered}-${coverageSummary.partial}-${coverageSummary.untested}`,
+      label: decisionSnapshot.label,
+      confidence: decisionSnapshot.confidence,
+      note: decisionSnapshot.rationale,
+    } satisfies ConfidenceHistoryPoint;
+
+    setConfidenceHistory((current) => {
+      if (current[current.length - 1]?.id === marker.id) {
+        return current;
+      }
+      return [...current.slice(-5), marker];
+    });
+  }, [
+    decisionSnapshot.state,
+    decisionSnapshot.label,
+    decisionSnapshot.confidence,
+    decisionSnapshot.rationale,
+    progressIndex,
+    analysis?.failed,
+    coverageSummary.covered,
+    coverageSummary.partial,
+    coverageSummary.untested,
+  ]);
+
+  function appendTimeline(entry: TimelineEntry) {
+    setTimelineEvents((current) => [entry, ...current].slice(0, 18));
+  }
+
+  useEffect(() => {
+    void refreshModelStatus();
+  }, []);
+
+  function resetState(fileName?: string) {
     setError(null);
     setReadyForReview(false);
     setProgressIndex(0);
@@ -161,6 +268,14 @@ export function VerificationDashboard() {
     setAnomalies([]);
     setAgentNote(null);
     setChatMessages([]);
+    setDocumentMeta(null);
+    setRunId(null);
+    setConfidenceHistory([]);
+    setTimelineEvents(
+      fileName
+        ? [createTimelineEntry("Run", "Workflow armed", `Loaded ${fileName}. Preparing structured requirement extraction.`, "accent")]
+        : [],
+    );
     if (reportUrl) {
       URL.revokeObjectURL(reportUrl);
       setReportUrl(null);
@@ -169,27 +284,72 @@ export function VerificationDashboard() {
 
   async function handleStart(file: File) {
     setBusy(true);
-    resetState();
+    resetState(file.name);
 
     try {
       const api = await import("../lib/api");
-      const extraction = await api.extractRequirements(file);
+      const extraction = await api.extractRequirements(file, mode);
+      setDocumentMeta(extraction.document);
+      setRunId(extraction.run_id);
       setRequirements(extraction.requirements);
       setConflicts(extraction.conflicts);
       setProgressIndex(1);
+      appendTimeline(
+        createTimelineEntry(
+          "Requirements",
+          `Parsed ${extraction.document.page_count}-page datasheet`,
+          `${extraction.requirements.length} measurable requirement${extraction.requirements.length === 1 ? "" : "s"} extracted from approximately ${compactNumber(extraction.document.approximate_input_tokens)} prompt tokens of source text.`,
+          "success",
+        ),
+      );
+      if (extraction.conflicts.length > 0) {
+        appendTimeline(
+          createTimelineEntry(
+            "Requirements",
+            `${extraction.conflicts.length} specification conflict${extraction.conflicts.length === 1 ? "" : "s"} flagged`,
+            "The requirement guardrail found contradictory statements that should be reviewed before signoff.",
+            "danger",
+          ),
+        );
+      }
 
-      const generatedTestPlan = await api.generateTestPlan(extraction.requirements);
+      const generatedTestPlan = await api.generateTestPlan(extraction.requirements, extraction.run_id);
       setTestPlan(generatedTestPlan);
       setProgressIndex(2);
+      appendTimeline(
+        createTimelineEntry(
+          "Test plan",
+          `${generatedTestPlan.length} executable case${generatedTestPlan.length === 1 ? "" : "s"} generated`,
+          "Requirements were converted into a bench-ready verification recipe with pass criteria per case.",
+          "accent",
+        ),
+      );
 
-      const generatedScript = await api.generateScript(generatedTestPlan);
+      const generatedScript = await api.generateScript(generatedTestPlan, extraction.run_id);
       setScript(generatedScript);
       setReadyForReview(true);
+      appendTimeline(
+        createTimelineEntry(
+          "Script",
+          "Bench sketch synthesized",
+          `${generatedScript.split(/\r?\n/).length} lines of Arduino logic are ready. The pipeline is paused for review before execution.`,
+          "success",
+        ),
+      );
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Verification bootstrap failed.");
       setProgressIndex(-1);
+      appendTimeline(
+        createTimelineEntry(
+          "Run",
+          "Bootstrap failed",
+          caughtError instanceof Error ? caughtError.message : "Verification bootstrap failed.",
+          "danger",
+        ),
+      );
     } finally {
       setBusy(false);
+      void refreshModelStatus();
     }
   }
 
@@ -203,43 +363,113 @@ export function VerificationDashboard() {
     setReadings([]);
     setAnomalies([]);
     setLiveBanner("Execution stream armed. Waiting for live readings...");
-    setAgentNote(null);
+    setAgentNote("Agent is transitioning from planning into evidence collection.");
+    appendTimeline(
+      createTimelineEntry(
+        "Execution",
+        "Execution approved",
+        `The generated sketch has been accepted and the ${mode} run is starting now.`,
+        "accent",
+      ),
+    );
 
     try {
       const api = await import("../lib/api");
       if (mode === "hardware") {
         await api.flashArduino(script);
         setLiveBanner("Sketch flashed. Streaming serial data from the Arduino rig.");
+        appendTimeline(
+          createTimelineEntry(
+            "Execution",
+            "Arduino rig flashed",
+            "The generated sketch is now live on the bench fixture and streaming serial telemetry.",
+            "success",
+          ),
+        );
       }
       setProgressIndex(3);
+      appendTimeline(
+        createTimelineEntry(
+          "Execution",
+          "Live telemetry opened",
+          `The dashboard is now receiving ${mode} readings in real time.`,
+          "accent",
+        ),
+      );
 
+      let streamedCount = 0;
       const streamedReadings = await api.streamExecution(mode, testPlan, 16, {
         onReading: (reading) => {
+          streamedCount += 1;
           startTransition(() => {
             setReadings((current) => [...current, reading]);
           });
           if (!reading.is_anomaly) {
             setLiveBanner(`Streaming ${reading.phase} sample ${reading.test_id}: Gate ${reading.gate} at ${reading.measured_voltage.toFixed(3)} V`);
           }
+          if (streamedCount === 1 || streamedCount % 6 === 0) {
+            appendTimeline(
+              createTimelineEntry(
+                "Execution",
+                `Evidence checkpoint ${streamedCount}`,
+                `Captured Gate ${reading.gate} at A=${reading.input_a} B=${reading.input_b} with ${reading.measured_voltage.toFixed(3)} V during ${reading.phase}.`,
+                reading.is_anomaly ? "danger" : "neutral",
+              ),
+            );
+          }
         },
         onAnomaly: (anomaly) => {
           setLiveBanner(anomaly.message);
           setAnomalies((current) => [anomaly, ...current].slice(0, 6));
+          setAgentNote(`Agent paused on ${anomaly.test_id}. It is checking spec margin, statistical weakness, and whether targeted follow-up should branch from this anomaly.`);
+          appendTimeline(
+            createTimelineEntry(
+              "Anomaly",
+              `${anomaly.test_id} crossed the spec corridor`,
+              anomaly.message,
+              anomaly.severity === "HIGH" ? "danger" : "accent",
+            ),
+          );
         },
         onComplete: (count) => {
           setLiveBanner(`Initial execution finished with ${count} streamed readings. Analysing now.`);
+          appendTimeline(
+            createTimelineEntry(
+              "Execution",
+              "Initial sweep complete",
+              `The first pass captured ${count} streamed readings and is being handed to analysis.`,
+              "success",
+            ),
+          );
         },
-      });
+      }, runId);
 
       let aggregatedReadings = streamedReadings;
-      let nextAnalysis = await api.analyseResults(aggregatedReadings, testPlan);
+      let nextAnalysis = await api.analyseResults(aggregatedReadings, testPlan, runId);
       setAnalysis(nextAnalysis);
       setProgressIndex(4);
+      appendTimeline(
+        createTimelineEntry(
+          "Analysis",
+          `${nextAnalysis.overall_result} after first pass`,
+          clipText(nextAnalysis.summary, 132),
+          nextAnalysis.overall_result === "FAIL" ? "danger" : "success",
+        ),
+      );
 
       let executedRuns: FollowUpRun[] = [];
       if (nextAnalysis.follow_up_plan.length > 0) {
-        setAgentNote(`Agent selected ${nextAnalysis.follow_up_plan.length} targeted rerun(s) and is collecting more evidence now.`);
-        const followUpResult = await api.runFollowUp(mode, testPlan, nextAnalysis.follow_up_plan);
+        setAgentNote(`Agent selected ${nextAnalysis.follow_up_plan.length} targeted rerun${nextAnalysis.follow_up_plan.length === 1 ? "" : "s"}. It is now collecting focused evidence before finalising the decision.`);
+        appendTimeline(
+          createTimelineEntry(
+            "Follow-up",
+            `${nextAnalysis.follow_up_plan.length} adaptive rerun${nextAnalysis.follow_up_plan.length === 1 ? "" : "s"} scheduled`,
+            "The agent saw either a hard failure or weak statistical margin and branched into targeted characterization automatically.",
+            "accent",
+          ),
+        );
+        await delay(mode === "simulation" ? 550 : 320);
+        const followUpResult = await api.runFollowUp(mode, testPlan, nextAnalysis.follow_up_plan, runId);
         executedRuns = followUpResult.runs;
         setFollowUpRuns(executedRuns);
         const followUpReadings = executedRuns.flatMap((run) => run.readings);
@@ -248,22 +478,55 @@ export function VerificationDashboard() {
         });
         aggregatedReadings = [...aggregatedReadings, ...followUpReadings];
         setLiveBanner(followUpResult.summary);
-        nextAnalysis = await api.analyseResults(aggregatedReadings, testPlan);
+        appendTimeline(
+          createTimelineEntry(
+            "Follow-up",
+            "Targeted evidence collected",
+            followUpResult.summary,
+            "success",
+          ),
+        );
+        nextAnalysis = await api.analyseResults(aggregatedReadings, testPlan, runId);
         setAnalysis(nextAnalysis);
+        appendTimeline(
+          createTimelineEntry(
+            "Analysis",
+            "Decision updated after follow-up",
+            clipText(nextAnalysis.summary, 132),
+            nextAnalysis.overall_result === "FAIL" ? "danger" : "success",
+          ),
+        );
       } else {
-        setAgentNote("Agent found no failing or statistically weak condition that required a targeted rerun.");
+        setAgentNote("Agent found no failing or statistically weak condition severe enough to justify a targeted rerun.");
+        appendTimeline(
+          createTimelineEntry(
+            "Follow-up",
+            "No adaptive branch required",
+            "The first-pass evidence was strong enough that the agent did not schedule a targeted rerun.",
+            "neutral",
+          ),
+        );
       }
 
       let nextBatchAnalysis: BatchAnalysis | null = null;
       if (mode === "simulation") {
-        nextBatchAnalysis = await api.runBatchAnalysis(testPlan, 5);
+        nextBatchAnalysis = await api.runBatchAnalysis(testPlan, 5, runId);
         setBatchAnalysis(nextBatchAnalysis);
+        appendTimeline(
+          createTimelineEntry(
+            "Predictive layer",
+            nextBatchAnalysis.drift_detected ? "Cross-batch drift surfaced" : "Cross-batch comparison stable",
+            clipText(nextBatchAnalysis.trend_summary, 132),
+            nextBatchAnalysis.drift_detected ? "danger" : "accent",
+          ),
+        );
       }
 
       const reportBlob = await api.generateReport(nextAnalysis, requirements, testPlan, {
         conflicts,
         batchAnalysis: nextBatchAnalysis,
         followUpRuns: executedRuns,
+        runId,
       });
       const nextUrl = URL.createObjectURL(reportBlob);
       if (reportUrl) {
@@ -272,6 +535,14 @@ export function VerificationDashboard() {
       setReportUrl(nextUrl);
       setProgressIndex(5);
       setReadyForReview(false);
+      appendTimeline(
+        createTimelineEntry(
+          "Report",
+          "Evidence package ready",
+          "The PDF report, decision summary, and evidence-grounded chat are now available.",
+          "success",
+        ),
+      );
       setChatMessages([
         {
           role: "assistant",
@@ -280,9 +551,12 @@ export function VerificationDashboard() {
         },
       ]);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "Execution failed after script review.");
+      const message = caughtError instanceof Error ? caughtError.message : "Execution failed after script review.";
+      setError(message);
+      appendTimeline(createTimelineEntry("Run", "Execution failed", message, "danger"));
     } finally {
       setBusy(false);
+      void refreshModelStatus();
     }
   }
 
@@ -294,8 +568,26 @@ export function VerificationDashboard() {
     setChatMessages((current) => [...current, { role: "user", text: question }]);
     try {
       const api = await import("../lib/api");
-      const response = await api.askResultsQuestion(question, analysis, readings, requirements, testPlan, batchAnalysis);
+      const response = await api.askResultsQuestion(
+        question,
+        analysis,
+        readings,
+        requirements,
+        testPlan,
+        batchAnalysis,
+        coverageSummary as unknown as Record<string, unknown>,
+        decisionSnapshot as unknown as Record<string, unknown>,
+        runId,
+      );
       setChatMessages((current) => [...current, { role: "assistant", text: response.answer, citations: response.citations }]);
+      appendTimeline(
+        createTimelineEntry(
+          "Q&A",
+          "Engineer queried the evidence graph",
+          clipText(question, 120),
+          "neutral",
+        ),
+      );
     } catch (caughtError) {
       setChatMessages((current) => [
         ...current,
@@ -303,14 +595,24 @@ export function VerificationDashboard() {
       ]);
     } finally {
       setChatBusy(false);
+      void refreshModelStatus();
     }
   }
 
+  const activeModelLabel = modelStatus ? modelStatus.active_provider : "Detecting";
+  const activeModelNote = modelStatus
+    ? clipText(
+        `${modelStatus.active_model}${modelStatus.fallback_provider ? ` | fallback: ${modelStatus.fallback_model}` : ""}${modelStatus.fallback_used ? " | Bedrock fallback active" : ""}`,
+        118,
+      )
+    : "Fetching current model routing from the backend.";
+
   const statItems = [
     { label: "Current mode", value: mode === "hardware" ? "Hardware" : "Simulation", note: "Hardware for real data, simulation for predictive batch runs." },
-    { label: "Requirements", value: String(requirements.length), note: "Structured constraints parsed from the datasheet." },
-    { label: "Readings", value: String(readings.length), note: "Streaming evidence currently in memory." },
-    { label: "Conflicts", value: String(conflicts.length), note: "Contradictory specification statements detected." },
+    { label: "Model", value: activeModelLabel, note: activeModelNote },
+    { label: "Decision", value: decisionSnapshot.label, note: decisionSnapshot.next_action },
+    { label: "Coverage", value: coverageSummary.total ? `${coverageSummary.covered}/${coverageSummary.total}` : "-", note: "Fully covered requirements in the current run scope." },
+    { label: "Run ID", value: runId ? runId.slice(0, 8) : "pending", note: runId ? "Persisted workflow identity for Neon-backed storage." : "Run identity appears once extraction starts." },
   ];
 
   const firstRequirement = requirements[0];
@@ -320,7 +622,7 @@ export function VerificationDashboard() {
   const worstGroup = analysis?.spc_summary.groups.find((group) => group.group_id === analysis.spc_summary.worst_group) ?? analysis?.spc_summary.groups[0];
   const reportInsight = mode === "simulation" && batchAnalysis
     ? clipText(batchAnalysis.trend_summary, 124)
-    : "Result chat is unlocked once the final analysis and report are ready.";
+    : "Result chat is grounded on failures, coverage gaps, and the current decision state once the report is ready.";
 
   const stepInsights: StepInsight[] = [
     {
@@ -329,7 +631,9 @@ export function VerificationDashboard() {
         : "Waiting for the uploaded datasheet so extraction can begin.",
       items: requirements.length
         ? [
-            `${requirements.length} measurable constraint${requirements.length === 1 ? "" : "s"} parsed into the verification workspace.`,
+            documentMeta
+              ? `${documentMeta.page_count} pages and ${documentMeta.character_count.toLocaleString()} extracted characters flowed into the extractor.`
+              : "Document metadata will appear once the PDF is parsed.",
             conflicts.length
               ? `${conflicts.length} requirement conflict${conflicts.length === 1 ? "" : "s"} detected for review.`
               : "No contradictory requirement statements were found in the extracted spec set.",
@@ -403,7 +707,7 @@ export function VerificationDashboard() {
     },
     {
       summary: reportUrl
-        ? "Final report generated. Download, presentation, and result chat are ready."
+        ? "Final report generated. Download, decision review, and result chat are ready."
         : "Final packaging starts after analysis, any follow-up runs, and optional batch prediction finish.",
       items: reportUrl
         ? [
@@ -417,42 +721,134 @@ export function VerificationDashboard() {
     },
   ];
 
+  const workspaceIntro =
+    progressIndex < 0
+      ? "Start a run to populate the active workspace."
+      : readyForReview
+        ? "The agent has paused after script generation so you can review the bench logic before execution."
+        : progressIndex === 5
+          ? "The run is complete. Review the final evidence, report, and Q&A from one place."
+          : "The workspace stays focused on the active stage so the operator is not scanning unrelated panels.";
+
+  const renderWorkspace = () => {
+    if (progressIndex === 1) {
+      return {
+        title: "Requirements review",
+        content: (
+          <section className="content-grid">
+            <RequirementsTable requirements={requirements} />
+            <ConflictPanel conflicts={conflicts} />
+          </section>
+        ),
+      };
+    }
+
+    if (progressIndex === 2) {
+      return {
+        title: "Planning and script review",
+        content: (
+          <section className="content-grid">
+            <TestPlanTable testPlan={testPlan} />
+            <ScriptViewer script={script} mode={mode} busy={busy} onApprove={handleReviewAndFlash} ready={readyForReview} />
+          </section>
+        ),
+      };
+    }
+
+    if (progressIndex === 3) {
+      return {
+        title: "Execution stream",
+        content: (
+          <section className="content-grid">
+            <LiveReadings readings={readings} liveBanner={liveBanner} anomalies={anomalies} />
+            <AgentLoopPanel analysis={analysis} followUpRuns={followUpRuns} agentNote={agentNote} />
+          </section>
+        ),
+      };
+    }
+
+    if (progressIndex === 4) {
+      return {
+        title: "Analysis and follow-up",
+        content: (
+          <div style={{ display: "grid", gap: "24px" }}>
+            <section className="content-grid">
+              <AnalysisPanel analysis={analysis} />
+              <StatisticalPanel analysis={analysis} />
+            </section>
+            <section className="content-grid">
+              <AgentLoopPanel analysis={analysis} followUpRuns={followUpRuns} agentNote={agentNote} />
+              {mode === "simulation" ? <BatchInsightPanel batchAnalysis={batchAnalysis} /> : <div />}
+            </section>
+          </div>
+        ),
+      };
+    }
+
+    if (progressIndex === 5) {
+      return {
+        title: "Final evidence package",
+        content: (
+          <div style={{ display: "grid", gap: "24px" }}>
+            <section className="content-grid">
+              <AnalysisPanel analysis={analysis} />
+              <ReportDownload reportUrl={reportUrl} busy={busy} />
+            </section>
+            <section className="content-grid">
+              <ResultsChatPanel ready={Boolean(analysis)} busy={chatBusy} messages={chatMessages} onAsk={handleAsk} />
+              <AgentLoopPanel analysis={analysis} followUpRuns={followUpRuns} agentNote={agentNote} />
+            </section>
+          </div>
+        ),
+      };
+    }
+
+    return {
+      title: "Active workspace",
+      content: null,
+    };
+  };
+
+  const workspace = renderWorkspace();
   return (
     <main className="page-shell">
       <div className="page-grid">
-        <motion.section 
+        <motion.section
           initial={{ opacity: 0, rotateX: 10, y: 30 }}
           animate={{ opacity: 1, rotateX: 0, y: 0 }}
           transition={{ duration: 0.8, ease: "easeOut" }}
-          className="hero" 
-          style={{ perspective: "1000px" }}
+          className="hero"
+          style={{ perspective: "1200px" }}
         >
-          <div className="panel panel-dark" style={{ transformStyle: "preserve-3d" }}>
-            <div className="eyebrow" style={{ transform: "translateZ(30px)" }}>AI Product Verification Engineer</div>
-            <h1 className="headline" style={{ transform: "translateZ(50px)" }}>Agentic verification, live on the bench.</h1>
-            <p className="subhead" style={{ transform: "translateZ(20px)" }}>
-              Upload a datasheet, generate the test plan and Arduino sketch, stream live readings from the DUT, let the
-              agent launch follow-up tests, compute SPC and batch risk, then interrogate the results in plain English.
+          <div className="panel panel-dark hero-card" style={{ transformStyle: "preserve-3d" }}>
+            <div className="hero-aurora hero-aurora-left" />
+            <div className="hero-aurora hero-aurora-right" />
+            <div className="eyebrow" style={{ transform: "translateZ(34px)" }}>AI Product Verification Engineer</div>
+            <h1 className="headline" style={{ transform: "translateZ(54px)" }}>Agentic verification with a real hardware control surface.</h1>
+            <p className="subhead" style={{ transform: "translateZ(24px)" }}>
+              Upload a datasheet, generate the plan and Arduino sketch, stream real or simulated evidence, let the agent branch into targeted reruns, and keep the operator oriented with coverage, timeline, and decision state in one view.
             </p>
-            <div style={{
-              position: "absolute",
-              right: "-10%",
-              top: "-20%",
-              width: "400px",
-              height: "400px",
-              background: "radial-gradient(circle, var(--cyan-dim) 0%, transparent 70%)",
-              filter: "blur(40px)",
-              zIndex: -1,
-              pointerEvents: "none"
-            }} />
+            <div className="hero-signal-row" style={{ transform: "translateZ(28px)" }}>
+              <span className="signal-chip">timeline playback</span>
+              <span className="signal-chip">adaptive follow-up</span>
+              <span className="signal-chip">coverage gap detection</span>
+              {modelStatus ? (
+                <span className="signal-chip">{`${modelStatus.active_provider}: ${modelStatus.active_model.split("/").pop() ?? modelStatus.active_model}`}</span>
+              ) : (
+                <span className="signal-chip">model routing</span>
+              )}
+              {modelStatus?.fallback_provider ? (
+                <span className="signal-chip">{modelStatus.fallback_used ? "bedrock fallback active" : "bedrock fallback armed"}</span>
+              ) : null}
+            </div>
           </div>
-          <div className="panel stack">
+          <div className="panel stack hero-side-panel">
             <div className="eyebrow">Live snapshot</div>
             <div className="stats-grid compact-grid">
               {statItems.map((item) => (
-                <div className="metric-card" key={item.label}>
+                <div className="metric-card metric-card-glow" key={item.label}>
                   <div className="muted">{item.label}</div>
-                  <div className="metric-value">{item.value}</div>
+                  <div className="metric-value metric-value-tight">{item.value}</div>
                   <div className="muted">{item.note}</div>
                 </div>
               ))}
@@ -460,113 +856,113 @@ export function VerificationDashboard() {
           </div>
         </motion.section>
 
-        <AnimatePresence mode="wait">
-        {progressIndex < 1 && (
-          <UploadSection mode={mode} busy={busy} onModeChange={setMode} onStart={handleStart} key="upload-section" />
-        )}
-        </AnimatePresence>
-        
-        {progressIndex >= 0 && (
-          <PipelineProgress
-            steps={progressSteps}
-            stepInsights={stepInsights}
-            activeIndex={progressIndex}
-            readyForReview={readyForReview}
-            workflowComplete={Boolean(reportUrl)}
-          />
-        )}
+        <section className="section-block">
+          <div className="section-heading">
+            <div>
+              <div className="eyebrow">Operations</div>
+              <h2 style={{ margin: 0 }}>Workflow controls</h2>
+            </div>
+            <p className="muted panel-aside">
+              Set the mode, load the source document, and inspect run progress without mixing in the execution panels.
+            </p>
+          </div>
+          <div className="control-grid">
+            <UploadSection mode={mode} busy={busy} workflowActive={progressIndex >= 0} onModeChange={setMode} onStart={handleStart} />
+            <PipelineProgress
+              steps={progressSteps}
+              stepInsights={stepInsights}
+              activeIndex={progressIndex}
+              readyForReview={readyForReview}
+              workflowComplete={Boolean(reportUrl)}
+            />
+          </div>
+        </section>
 
-        {error && (
-          <motion.section 
+        {progressIndex >= 0 ? (
+          <section className="section-block">
+            <div className="section-heading">
+              <div>
+                <div className="eyebrow">Overview</div>
+                <h2 style={{ margin: 0 }}>Decision and coverage</h2>
+              </div>
+              <p className="muted panel-aside">
+                Keep release state, confidence history, and requirement coverage in one stable area while the active workspace changes beneath it.
+              </p>
+            </div>
+            <section className="dashboard-mosaic">
+              <DecisionPanel decision={decisionSnapshot} history={confidenceHistory} />
+              <CoveragePanel coverage={coverageSummary} />
+            </section>
+          </section>
+        ) : null}
+
+        {progressIndex >= 0 ? (
+          <section className="section-block">
+            <div className="section-heading">
+              <div>
+                <div className="eyebrow">Trace</div>
+                <h2 style={{ margin: 0 }}>Agent timeline</h2>
+              </div>
+              <p className="muted panel-aside">
+                The reasoning log stays separate from the workspace so playback does not compete with the current task.
+              </p>
+            </div>
+            <AgentTimelinePanel events={timelineEvents} />
+          </section>
+        ) : null}
+
+        {error ? (
+          <motion.section
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="panel" 
+            className="panel"
             style={{ borderColor: "var(--danger)", boxShadow: "0 0 20px rgba(255,51,102,0.2)" }}
           >
             <div className="eyebrow" style={{ color: "var(--danger)" }}>Pipeline interruption</div>
             <h2 style={{ marginTop: 12, color: "var(--danger)" }}>Execution halted</h2>
             <p>{error}</p>
           </motion.section>
-        )}
-
-        <AnimatePresence mode="popLayout">
-        {progressIndex === 1 && (
-          <motion.section 
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -30 }}
-            className="content-grid"
-            key="stage-1"
-          >
-            <RequirementsTable requirements={requirements} />
-            <ConflictPanel conflicts={conflicts} />
-          </motion.section>
-        )}
-
-        {progressIndex === 2 && (
-          <motion.section 
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -30 }}
-            className="content-grid"
-            key="stage-2"
-          >
-            <TestPlanTable testPlan={testPlan} />
-            <ScriptViewer script={script} mode={mode} busy={busy} onApprove={handleReviewAndFlash} ready={readyForReview} />
-          </motion.section>
-        )}
-
-        {progressIndex === 3 && (
-          <motion.section 
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -30 }}
-            className="content-grid"
-            key="stage-3"
-          >
-            <LiveReadings readings={readings} liveBanner={liveBanner} anomalies={anomalies} />
-            <AgentLoopPanel analysis={analysis} followUpRuns={followUpRuns} agentNote={agentNote} />
-          </motion.section>
-        )}
-
-        {progressIndex === 4 && (
-          <motion.div 
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -30 }}
-            key="stage-4"
-            style={{ display: "grid", gap: "24px" }}
-          >
-            <section className="content-grid">
-              <AnalysisPanel analysis={analysis} />
-              <StatisticalPanel analysis={analysis} />
-            </section>
-            <section className="content-grid">
-              <AgentLoopPanel analysis={analysis} followUpRuns={followUpRuns} agentNote={agentNote} />
-              {mode === "simulation" && <BatchInsightPanel batchAnalysis={batchAnalysis} />}
-            </section>
-          </motion.div>
-        )}
-
-        {progressIndex === 5 && (
-          <motion.div 
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -30 }}
-            key="stage-5"
-            style={{ display: "grid", gap: "24px" }}
-          >
-            <section className="content-grid">
-              <AnalysisPanel analysis={analysis} />
-              <ReportDownload reportUrl={reportUrl} busy={busy} />
-            </section>
-            <ResultsChatPanel ready={Boolean(analysis)} busy={chatBusy} messages={chatMessages} onAsk={handleAsk} />
-          </motion.div>
-        )}
-        </AnimatePresence>
+        ) : null}
+        {progressIndex >= 0 ? (
+          <section className="section-block">
+            <div className="section-heading">
+              <div>
+                <div className="eyebrow">Workspace</div>
+                <h2 style={{ margin: 0 }}>{workspace.title}</h2>
+              </div>
+              <p className="muted panel-aside">{workspaceIntro}</p>
+            </div>
+            <div className="workspace-shell">
+              <AnimatePresence mode="wait">
+                {workspace.content ? (
+                  <motion.div
+                    initial={{ opacity: 0, y: 26 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -20 }}
+                    transition={{ duration: 0.28, ease: "easeOut" }}
+                    key={`workspace-${progressIndex}`}
+                    style={{ display: "grid", gap: "24px" }}
+                  >
+                    {workspace.content}
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </div>
+          </section>
+        ) : null}
       </div>
     </main>
   );
 }
+
+
+
+
+
+
+
+
+
+
 
 

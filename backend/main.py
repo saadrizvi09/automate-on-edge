@@ -13,18 +13,24 @@ from pydantic import BaseModel, Field
 
 from backend.agents.analyser import analyse_results
 from backend.agents.conflict_detector import detect_requirement_conflicts
-from backend.agents.extractor import extract_requirements, extract_text_from_pdf
+from backend.agents.extractor import extract_pdf_context, extract_requirements
 from backend.agents.follow_up import summarize_follow_up_runs
 from backend.agents.report_writer import write_report_narrative
 from backend.agents.result_qa import answer_results_question
 from backend.agents.script_generator import SCRIPT_PATH, generate_arduino_script
 from backend.agents.test_planner import generate_test_plan
 from backend.analytics.batch_predictor import run_cross_batch_analysis
-from backend.config import ARDUINO_BOARD, ARDUINO_PORT
+from backend.config import ARDUINO_BOARD, ARDUINO_PORT, get_model_status
 from backend.hardware.arduino_uploader import upload_to_arduino
 from backend.hardware.serial_reader import iter_serial_data, read_serial_data
 from backend.report.pdf_generator import generate_pdf_report
 from backend.simulator.mock_device import MockDevice
+from backend.persistence.run_store import (
+    append_run_event,
+    create_run_record,
+    fetch_run_record,
+    update_run_record,
+)
 
 app = FastAPI(title="AI Product Verification Engineer Agent")
 app.add_middleware(
@@ -39,12 +45,14 @@ class RequirementsPayload(BaseModel):
     """Request body for generating a test plan from requirements."""
 
     requirements: list[dict]
+    run_id: str | None = None
 
 
 class TestPlanPayload(BaseModel):
     """Request body for generating an Arduino script from a test plan."""
 
     test_plan: list[dict]
+    run_id: str | None = None
 
 
 class FlashPayload(BaseModel):
@@ -88,6 +96,7 @@ class StreamExecutionPayload(BaseModel):
     test_plan: list[dict]
     expected_count: int = Field(default=16, ge=1)
     port: str = ARDUINO_PORT
+    run_id: str | None = None
 
 
 class AnalysisPayload(BaseModel):
@@ -95,6 +104,7 @@ class AnalysisPayload(BaseModel):
 
     readings: list[dict]
     test_plan: list[dict]
+    run_id: str | None = None
 
 
 class FollowUpPayload(BaseModel):
@@ -104,6 +114,7 @@ class FollowUpPayload(BaseModel):
     test_plan: list[dict]
     follow_up_plan: list[dict]
     port: str = ARDUINO_PORT
+    run_id: str | None = None
 
 
 class BatchPayload(BaseModel):
@@ -111,6 +122,7 @@ class BatchPayload(BaseModel):
 
     test_plan: list[dict]
     batch_count: int = Field(default=5, ge=1, le=10)
+    run_id: str | None = None
 
 
 class QuestionPayload(BaseModel):
@@ -122,6 +134,9 @@ class QuestionPayload(BaseModel):
     requirements: list[dict]
     test_plan: list[dict]
     batch_analysis: dict | None = None
+    coverage_summary: dict | None = None
+    decision_state: dict | None = None
+    run_id: str | None = None
 
 
 class ReportPayload(BaseModel):
@@ -134,6 +149,7 @@ class ReportPayload(BaseModel):
     conflicts: list[dict] = Field(default_factory=list)
     batch_analysis: dict | None = None
     follow_up_runs: list[dict] = Field(default_factory=list)
+    run_id: str | None = None
 
 
 def _success_response(data: dict, message: str) -> JSONResponse:
@@ -159,10 +175,32 @@ async def extract_requirements_route(request: Request) -> JSONResponse:
     """Extract structured requirements and detect conflicts from a PDF byte stream."""
     try:
         pdf_bytes = await request.body()
-        requirements = extract_requirements(extract_text_from_pdf(pdf_bytes))
+        document = extract_pdf_context(pdf_bytes)
+        document_name = request.headers.get("x-document-name")
+        mode = request.headers.get("x-verification-mode", "hardware")
+        run_id = create_run_record(mode, document_name, document)
+        requirements = extract_requirements(document["text"])
         conflicts = detect_requirement_conflicts(requirements)
+        update_run_record(
+            run_id,
+            "requirements",
+            document_name=document_name,
+            document_meta=document,
+            requirements=requirements,
+            conflicts=conflicts,
+        )
+        append_run_event(
+            run_id,
+            "requirements",
+            "requirements_extracted",
+            {
+                "requirements": len(requirements),
+                "conflicts": len(conflicts),
+                "document_name": document_name,
+            },
+        )
         return _success_response(
-            {"requirements": requirements, "conflicts": conflicts},
+            {"requirements": requirements, "conflicts": conflicts, "document": document, "run_id": run_id},
             "Requirements extracted successfully",
         )
     except Exception as exc:
@@ -174,7 +212,14 @@ async def generate_test_plan_route(payload: RequirementsPayload) -> JSONResponse
     """Generate a verification test plan from extracted requirements."""
     try:
         test_plan = generate_test_plan(payload.requirements)
-        return _success_response({"test_plan": test_plan}, "Test plan generated successfully")
+        update_run_record(payload.run_id, "test_plan", test_plan=test_plan)
+        append_run_event(
+            payload.run_id,
+            "test_plan",
+            "test_plan_generated",
+            {"test_cases": len(test_plan)},
+        )
+        return _success_response({"test_plan": test_plan, "run_id": payload.run_id}, "Test plan generated successfully")
     except Exception as exc:
         return _error_response(str(exc))
 
@@ -184,8 +229,15 @@ async def generate_script_route(payload: TestPlanPayload) -> JSONResponse:
     """Generate an Arduino sketch from a structured test plan."""
     try:
         script = generate_arduino_script(payload.test_plan)
+        update_run_record(payload.run_id, "script", script=script)
+        append_run_event(
+            payload.run_id,
+            "script",
+            "script_generated",
+            {"script_lines": len(script.splitlines())},
+        )
         return _success_response(
-            {"script": script, "script_path": str(SCRIPT_PATH)},
+            {"script": script, "script_path": str(SCRIPT_PATH), "run_id": payload.run_id},
             "Arduino script generated successfully",
         )
     except Exception as exc:
@@ -249,6 +301,14 @@ async def run_simulation_route(payload: SimulationPayload) -> JSONResponse:
 async def stream_execution_route(payload: StreamExecutionPayload) -> StreamingResponse:
     """Stream execution readings and anomaly events for the dashboard."""
 
+    update_run_record(payload.run_id, "execution")
+    append_run_event(
+        payload.run_id,
+        "execution",
+        "execution_started",
+        {"mode": payload.mode, "expected_count": payload.expected_count},
+    )
+
     def event_stream():
         readings: list[dict] = []
         if payload.mode == "hardware":
@@ -262,10 +322,12 @@ async def stream_execution_route(payload: StreamExecutionPayload) -> StreamingRe
                 )
             )
 
+        anomaly_count = 0
         for reading in iterator:
             readings.append(reading)
             yield _stream_line("reading", reading)
             if reading.get("is_anomaly") or reading["result"] == "FAIL":
+                anomaly_count += 1
                 yield _stream_line(
                     "anomaly",
                     {
@@ -279,6 +341,12 @@ async def stream_execution_route(payload: StreamExecutionPayload) -> StreamingRe
                 )
             time.sleep(0.08 if payload.mode == "simulation" else 0.02)
 
+        append_run_event(
+            payload.run_id,
+            "execution",
+            "execution_completed",
+            {"readings": len(readings), "anomalies": anomaly_count},
+        )
         yield _stream_line("complete", {"count": len(readings)})
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
@@ -289,7 +357,18 @@ async def analyse_results_route(payload: AnalysisPayload) -> JSONResponse:
     """Analyse collected readings against the test plan."""
     try:
         analysis = analyse_results(payload.readings, payload.test_plan)
-        return _success_response({"analysis": analysis}, "Results analysed successfully")
+        update_run_record(payload.run_id, "analysis", readings=payload.readings, analysis=analysis)
+        append_run_event(
+            payload.run_id,
+            "analysis",
+            "analysis_completed",
+            {
+                "overall_result": analysis.get("overall_result"),
+                "failed": analysis.get("failed"),
+                "passed": analysis.get("passed"),
+            },
+        )
+        return _success_response({"analysis": analysis, "run_id": payload.run_id}, "Results analysed successfully")
     except Exception as exc:
         return _error_response(str(exc))
 
@@ -336,8 +415,15 @@ async def run_follow_up_route(payload: FollowUpPayload) -> JSONResponse:
                     "readings": readings,
                 }
             )
+        update_run_record(payload.run_id, "follow_up", follow_up_runs=runs)
+        append_run_event(
+            payload.run_id,
+            "follow_up",
+            "follow_up_completed",
+            {"runs": len(runs), "readings": sum(len(run["readings"]) for run in runs)},
+        )
         return _success_response(
-            {"runs": runs, "summary": summarize_follow_up_runs(runs)},
+            {"runs": runs, "summary": summarize_follow_up_runs(runs), "run_id": payload.run_id},
             "Follow-up runs executed successfully",
         )
     except Exception as exc:
@@ -349,7 +435,17 @@ async def run_batch_analysis_route(payload: BatchPayload) -> JSONResponse:
     """Run multi-batch simulation analysis for failure prediction."""
     try:
         batch_analysis = run_cross_batch_analysis(payload.test_plan, payload.batch_count)
-        return _success_response({"batch_analysis": batch_analysis}, "Batch analysis completed successfully")
+        update_run_record(payload.run_id, "batch_analysis", batch_analysis=batch_analysis)
+        append_run_event(
+            payload.run_id,
+            "batch_analysis",
+            "batch_analysis_completed",
+            {
+                "batch_count": batch_analysis.get("batch_count"),
+                "drift_detected": batch_analysis.get("drift_detected"),
+            },
+        )
+        return _success_response({"batch_analysis": batch_analysis, "run_id": payload.run_id}, "Batch analysis completed successfully")
     except Exception as exc:
         return _error_response(str(exc))
 
@@ -365,8 +461,20 @@ async def ask_results_route(payload: QuestionPayload) -> JSONResponse:
             payload.requirements,
             payload.test_plan,
             payload.batch_analysis,
+            payload.coverage_summary,
+            payload.decision_state,
         )
-        return _success_response({"response": answer}, "Question answered successfully")
+        append_run_event(
+            payload.run_id,
+            "qa",
+            "chat_answered",
+            {
+                "question": payload.question,
+                "answer": answer.get("answer", ""),
+                "citations": answer.get("citations", [])[:5],
+            },
+        )
+        return _success_response({"response": answer, "run_id": payload.run_id}, "Question answered successfully")
     except Exception as exc:
         return _error_response(str(exc))
 
@@ -388,6 +496,13 @@ async def generate_report_route(payload: ReportPayload) -> Response:
             payload.batch_analysis,
             payload.follow_up_runs,
         )
+        update_run_record(payload.run_id, "report", report_generated=True, report_name="dvp_report.pdf")
+        append_run_event(
+            payload.run_id,
+            "report",
+            "report_generated",
+            {"filename": "dvp_report.pdf"},
+        )
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -397,7 +512,34 @@ async def generate_report_route(payload: ReportPayload) -> Response:
         return _error_response(str(exc))
 
 
+@app.get("/api/runs/{run_id}")
+async def get_run_route(run_id: str) -> JSONResponse:
+    """Return the persisted run record and event log when database storage is enabled."""
+    record = fetch_run_record(run_id)
+    if not record:
+        return _error_response("Run not found", status_code=404)
+    return _success_response({"run": record}, "Run record retrieved successfully")
+
+
+@app.get("/api/model-status")
+async def model_status_route() -> JSONResponse:
+    """Return the configured model routing stack and the active provider/model."""
+    return _success_response({"model": get_model_status()}, "Model status retrieved successfully")
+
 @app.get("/api/health")
 async def health_route() -> JSONResponse:
     """Return a basic health response for the FastAPI service."""
     return _success_response({"status": "ok"}, "Service healthy")
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,5 +1,11 @@
 export type VerificationMode = "hardware" | "simulation";
 
+export interface ExtractionDocument {
+  page_count: number;
+  character_count: number;
+  approximate_input_tokens: number;
+}
+
 export interface RequirementItem {
   id: string;
   description: string;
@@ -153,6 +159,18 @@ export interface ChatResponse {
   citations: ChatCitation[];
 }
 
+export interface ModelStatus {
+  primary_provider: string;
+  primary_model: string;
+  fallback_provider: string | null;
+  fallback_model: string | null;
+  active_provider: string;
+  active_model: string;
+  fallback_used: boolean;
+  last_error: string | null;
+  routing_mode: string;
+}
+
 interface ApiEnvelope<T> {
   status: "success" | "error";
   data: T;
@@ -181,28 +199,45 @@ async function readJson<T>(path: string, init: RequestInit): Promise<T> {
   return payload.data;
 }
 
-export async function extractRequirements(file: File): Promise<{ requirements: RequirementItem[]; conflicts: RequirementConflict[] }> {
-  return readJson<{ requirements: RequirementItem[]; conflicts: RequirementConflict[] }>("/api/extract-requirements", {
+export async function getModelStatus(): Promise<ModelStatus> {
+  const data = await readJson<{ model: ModelStatus }>("/api/model-status", {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+  });
+  return data.model;
+}
+export async function extractRequirements(file: File, mode: VerificationMode): Promise<{
+  requirements: RequirementItem[];
+  conflicts: RequirementConflict[];
+  document: ExtractionDocument;
+  run_id: string | null;
+}> {
+  return readJson<{
+    requirements: RequirementItem[];
+    conflicts: RequirementConflict[];
+    document: ExtractionDocument;
+    run_id: string | null;
+  }>("/api/extract-requirements", {
     method: "POST",
-    headers: { "Content-Type": "application/pdf" },
+    headers: { "Content-Type": "application/pdf", "x-document-name": file.name, "x-verification-mode": mode },
     body: await file.arrayBuffer(),
   });
 }
 
-export async function generateTestPlan(requirements: RequirementItem[]): Promise<TestPlanItem[]> {
+export async function generateTestPlan(requirements: RequirementItem[], runId: string | null): Promise<TestPlanItem[]> {
   const data = await readJson<{ test_plan: TestPlanItem[] }>("/api/generate-test-plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ requirements }),
+    body: JSON.stringify({ requirements, run_id: runId }),
   });
   return data.test_plan;
 }
 
-export async function generateScript(testPlan: TestPlanItem[]): Promise<string> {
+export async function generateScript(testPlan: TestPlanItem[], runId: string | null): Promise<string> {
   const data = await readJson<{ script: string }>("/api/generate-script", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ test_plan: testPlan }),
+    body: JSON.stringify({ test_plan: testPlan, run_id: runId }),
   });
   return data.script;
 }
@@ -242,11 +277,12 @@ export async function streamExecution(
     onAnomaly?: (anomaly: AnomalyHighlight) => void;
     onComplete?: (count: number) => void;
   },
+  runId: string | null,
 ): Promise<ReadingItem[]> {
   const response = await fetch(buildApiUrl("/api/stream-execution"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode, test_plan: testPlan, expected_count: expectedCount }),
+    body: JSON.stringify({ mode, test_plan: testPlan, expected_count: expectedCount, run_id: runId }),
   });
   if (!response.ok || !response.body) {
     throw new Error("Execution stream could not be started.");
@@ -287,11 +323,11 @@ export async function streamExecution(
   return readings;
 }
 
-export async function analyseResults(readings: ReadingItem[], testPlan: TestPlanItem[]): Promise<AnalysisResult> {
+export async function analyseResults(readings: ReadingItem[], testPlan: TestPlanItem[], runId: string | null): Promise<AnalysisResult> {
   const data = await readJson<{ analysis: AnalysisResult }>("/api/analyse-results", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ readings, test_plan: testPlan }),
+    body: JSON.stringify({ readings, test_plan: testPlan, run_id: runId }),
   });
   return data.analysis;
 }
@@ -300,19 +336,20 @@ export async function runFollowUp(
   mode: VerificationMode,
   testPlan: TestPlanItem[],
   followUpPlan: FollowUpPlan[],
+  runId: string | null,
 ): Promise<{ runs: FollowUpRun[]; summary: string }> {
   return readJson<{ runs: FollowUpRun[]; summary: string }>("/api/run-follow-up", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode, test_plan: testPlan, follow_up_plan: followUpPlan }),
+    body: JSON.stringify({ mode, test_plan: testPlan, follow_up_plan: followUpPlan, run_id: runId }),
   });
 }
 
-export async function runBatchAnalysis(testPlan: TestPlanItem[], batchCount = 5): Promise<BatchAnalysis> {
+export async function runBatchAnalysis(testPlan: TestPlanItem[], batchCount = 5, runId: string | null = null): Promise<BatchAnalysis> {
   const data = await readJson<{ batch_analysis: BatchAnalysis }>("/api/run-batch-analysis", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ test_plan: testPlan, batch_count: batchCount }),
+    body: JSON.stringify({ test_plan: testPlan, batch_count: batchCount, run_id: runId }),
   });
   return data.batch_analysis;
 }
@@ -324,6 +361,9 @@ export async function askResultsQuestion(
   requirements: RequirementItem[],
   testPlan: TestPlanItem[],
   batchAnalysis: BatchAnalysis | null,
+  coverageSummary: Record<string, unknown> | null,
+  decisionState: Record<string, unknown> | null,
+  runId: string | null,
 ): Promise<ChatResponse> {
   const data = await readJson<{ response: ChatResponse }>("/api/ask-results", {
     method: "POST",
@@ -335,6 +375,9 @@ export async function askResultsQuestion(
       requirements,
       test_plan: testPlan,
       batch_analysis: batchAnalysis,
+      coverage_summary: coverageSummary,
+      decision_state: decisionState,
+      run_id: runId,
     }),
   });
   return data.response;
@@ -348,6 +391,7 @@ export async function generateReport(
     conflicts: RequirementConflict[];
     batchAnalysis: BatchAnalysis | null;
     followUpRuns: FollowUpRun[];
+    runId: string | null;
   },
 ): Promise<Blob> {
   const response = await fetch(buildApiUrl("/api/generate-report"), {
@@ -360,6 +404,7 @@ export async function generateReport(
       conflicts: extras.conflicts,
       batch_analysis: extras.batchAnalysis,
       follow_up_runs: extras.followUpRuns,
+      run_id: extras.runId,
     }),
   });
   if (!response.ok) {
@@ -368,3 +413,7 @@ export async function generateReport(
   }
   return response.blob();
 }
+
+
+
+

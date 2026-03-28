@@ -1,6 +1,7 @@
 """PDF extraction agent for converting datasheet content into structured requirements."""
 
 import json
+import math
 from json import JSONDecodeError
 
 import fitz
@@ -26,6 +27,30 @@ Specification text:
 REQUIRED_KEYS = {"id", "description", "acceptance_criteria", "test_method"}
 
 
+def extract_pdf_context(pdf_bytes: bytes) -> dict:
+    """
+    Extract text and basic metadata from a PDF byte stream.
+
+    Args:
+        pdf_bytes: Raw bytes of the source PDF document.
+
+    Returns:
+        A dictionary with extracted text and size metadata for downstream budgeting.
+    """
+    document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        pages = [page.get_text("text").strip() for page in document]
+        text = "\n".join(page for page in pages if page).strip()
+        return {
+            "text": text,
+            "page_count": document.page_count,
+            "character_count": len(text),
+            "approximate_input_tokens": max(1, math.ceil(len(text) / 4)),
+        }
+    finally:
+        document.close()
+
+
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """
     Extract all text content from a PDF byte stream.
@@ -36,11 +61,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     Returns:
         The concatenated text extracted from each page of the PDF.
     """
-    document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        return "\n".join(page.get_text("text").strip() for page in document).strip()
-    finally:
-        document.close()
+    return extract_pdf_context(pdf_bytes)["text"]
 
 
 def _parse_requirements(raw_response: str) -> list[dict]:

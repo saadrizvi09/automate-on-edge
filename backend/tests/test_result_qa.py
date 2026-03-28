@@ -25,3 +25,32 @@ def test_answer_results_question_uses_fallback_for_thermal_question(mock_ask_nov
     assert "Gate 2" in answer["answer"]
     assert answer["citations"][0]["kind"] == "batch"
     assert mock_ask_nova.called
+
+
+@patch("backend.agents.result_qa.ask_nova", side_effect=ValueError("no key"))
+def test_answer_results_question_surfaces_rejection_reason_and_coverage_gap(mock_ask_nova) -> None:
+    """Verify rejection questions cite both the leading failure and the current coverage gap."""
+    answer = answer_results_question(
+        "Why did you reject this chip?",
+        {
+            "total_tests": 16,
+            "failed": 2,
+            "spc_summary": {"groups": []},
+            "failures": [
+                {
+                    "test_id": "TC-012",
+                    "description": "Gate 2 output LOW voltage out of spec",
+                }
+            ],
+        },
+        [],
+        [{"id": "REQ-001", "description": "Output LOW voltage must be less than 0.4V"}],
+        [],
+        None,
+        {"gaps": ["REQ-004 is mapped but not yet exercised under timing conditions."]},
+        {"next_action": "Quarantine the DUT and collect timing evidence before release."},
+    )
+
+    assert "TC-012" in answer["answer"]
+    assert any(citation["kind"] == "coverage" for citation in answer["citations"])
+    assert mock_ask_nova.called

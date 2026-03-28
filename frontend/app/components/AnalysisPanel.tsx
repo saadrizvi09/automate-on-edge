@@ -1,4 +1,4 @@
-import type { AnalysisResult } from "../lib/api";
+﻿import type { AnalysisResult } from "../lib/api";
 
 interface AnalysisPanelProps {
   analysis: AnalysisResult | null;
@@ -7,7 +7,7 @@ interface AnalysisPanelProps {
 export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
   return (
     <section className="panel stack">
-      <div className="eyebrow">Stage 6 output</div>
+      <div className="eyebrow">Failure review</div>
       <h2 style={{ margin: 0 }}>Failure analysis</h2>
       {!analysis ? (
         <p className="muted">No analysis available yet.</p>
@@ -51,3 +51,4 @@ export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
     </section>
   );
 }
+

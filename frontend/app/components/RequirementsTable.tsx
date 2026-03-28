@@ -1,4 +1,4 @@
-import type { RequirementItem } from "../lib/api";
+﻿import type { RequirementItem } from "../lib/api";
 
 interface RequirementsTableProps {
   requirements: RequirementItem[];
@@ -7,7 +7,7 @@ interface RequirementsTableProps {
 export function RequirementsTable({ requirements }: RequirementsTableProps) {
   return (
     <section className="panel stack">
-      <div className="eyebrow">Stage 2 output</div>
+      <div className="eyebrow">Requirements</div>
       <h2 style={{ margin: 0 }}>Extracted requirements</h2>
       <div className="table-wrap">
         <table>
@@ -40,3 +40,4 @@ export function RequirementsTable({ requirements }: RequirementsTableProps) {
     </section>
   );
 }
+

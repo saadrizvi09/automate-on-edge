@@ -1,4 +1,4 @@
-import type { AnalysisResult, SpcGroup } from "../lib/api";
+﻿import type { AnalysisResult, SpcGroup } from "../lib/api";
 
 interface StatisticalPanelProps {
   analysis: AnalysisResult | null;
@@ -28,7 +28,7 @@ export function StatisticalPanel({ analysis }: StatisticalPanelProps) {
 
   return (
     <section className="panel stack">
-      <div className="eyebrow">Feature 2</div>
+      <div className="eyebrow">SPC engine</div>
       <h2 style={{ margin: 0 }}>Statistical process control</h2>
       {!analysis ? (
         <p className="muted">Run the verification flow to compute mean, standard deviation, and Cpk for each measured condition.</p>
@@ -96,3 +96,4 @@ export function StatisticalPanel({ analysis }: StatisticalPanelProps) {
     </section>
   );
 }
+

@@ -46,3 +46,6 @@ Thumbs.db
 # Local design reference
 ARCHITECTURE.md
 
+# Codex local workspace metadata
+.codex/
+
